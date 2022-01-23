@@ -1,0 +1,170 @@
+---
+title: "Finalize Phyloseq Object"
+output: html_notebook
+---
+
+* Incorporate phylogenetic tree into phyloseq object
+* Save master phyloseq objects
+
+```{r}
+library(dada2)
+library(tidyr)
+library(dplyr)
+library(phyloseq)
+library(ggplot2)
+library(ape)
+```
+
+```{r}
+DataDir = '/project/mmicrobe/Boyd/16S/DADA2files'
+phyloseq_file = 'Boyd_phyloseq_thresh.rds'
+tree_file = '/project/mmicrobe/Boyd/Fasttree/Master_wSulfo.tree'
+```
+
+```{r}
+ps.thresh = readRDS(file.path(DataDir, phyloseq_file))
+ps.thresh
+```
+```{r}
+thresh.tree = read_tree(tree_file)
+
+
+thresh.tree = root(thresh.tree, outgroup = 'X90478', r = TRUE)
+is.rooted(thresh.tree)
+
+
+```
+
+# Create dummy phyloseq object to incorporate sulfolobus 
+```{r}
+ps0 <- prune_taxa(taxa_names(ps.thresh)[1:5], ps.thresh)
+ps0 <- prune_samples(sample_names(ps0)[1:5], ps0)
+
+otu_mat = matrix(1, nrow = 1, ncol = 1)
+colnames(otu_mat) = "X90478"
+rownames(otu_mat) <- "Root"
+OTU <- otu_table(otu_mat, taxa_are_rows = FALSE)
+
+
+SAM <- sample_data(ps.thresh)[1,]
+SAM[,] <- NA
+sample_names(SAM) <- "Root"
+# or : rownames(SAM) <- "Reference"
+
+
+tmp = tax_table(ps0) %>% as.data.frame()
+
+tmp["X90478",] = c("Archaea", "Crenarchaeota", "Thermoprotei", "Sulfolobales", "Sulfolobaceae","Saccharolobus" )
+tmp = tmp %>% as.matrix()
+
+tmp = tmp["X90478",, drop = FALSE]
+
+
+
+rootTax = tax_table(tmp)
+rootTax
+ps.root <- phyloseq(OTU, SAM, rootTax)
+ps.root %>% taxa_names()
+
+ps.merged =  merge_phyloseq(ps.thresh, ps.root)
+ps.merged
+
+tax_table(ps.merged) %>% tail()
+otu_table(ps.merged)[1:5,7529]
+```
+
+
+# Join bacterial tree with phyloseq
+* This will result in the loss of archaea so need to use both phyloseq objects
+```{r}
+ps = merge_phyloseq(ps.merged, thresh.tree)
+
+#force polytomies to dichotomies
+phy_tree(ps) = multi2di(phy_tree(ps), random = FALSE)
+ps
+
+
+```
+```{r}
+#remove mitochondria
+ps = subset_taxa(ps, Family != "Mitochondria" | is.na(Family))
+ps = subset_taxa(ps, Order != "Chloroplast" | is.na(Order))
+ps
+```
+```{r}
+saveRDS(ps, file.path(DataDir,'Boyd_phyloseq_thresh_wTree.rds'))
+```
+
+# Check duplicates
+```{r}
+sd = ps %>% sample_data() %>% as.data.frame()
+sd %>% head()
+Dups = sd %>% 
+  group_by(SampleID) %>%
+  summarize(n = length(SampleID)) %>%
+  filter(n > 1)
+Dups
+
+Dups = Dups$SampleID %>% as.character() 
+Dups
+```
+
+```{r}
+ps.s = ps %>% subset_samples(!is.na(TimePoint))
+ordu = ordinate(ps.s, "PCoA", "bray", weighted=TRUE)
+p = plot_ordination(ps.s, ordu, justDF = TRUE)
+plot_ordination(ps.s, ordu)
+```
+
+```{r}
+#setwd(figDir)
+#cs = brewer.pal(3,"Dark2")
+p = p %>%
+  mutate(Dup = ifelse(SampleID %in% Dups[16], "Duplicate", "Single"))
+p1 = ggplot(p, aes(x = Axis.1, y = Axis.2)) +
+geom_point(aes(color = Dup),  size = 3, stroke = 1.5) +
+#theme_pub() +
+#scale_shape_manual(values=c(22,21,23), guide = guide_legend(title = "Soil", ncol = 1))+
+#scale_color_manual(values=c('Orange','Black'))+
+scale_color_manual(values = c('Orange','Black'))+
+labs(x = "PCoA 1 [44.3%]", y = "PCoA 2 [17.3%]") +
+ggtitle("PCoA of Weighted UniFrac Distances")+
+facet_wrap(~TimePoint, ncol = 2)
+
+#guides(fill=guide_legend(override.aes=list(colour= cs), ncol = 3)) + 
+#theme(legend.position="bottom") 
+
+#color = "grey20",
+
+p1
+
+
+```
+
+* Duplicates do not cluster well.  Show greater separation than in any dataset I have worked with.  Possible that there is less overall variation compared to other studies.  Plot treatment differences to see if there is any separation
+
+```{r}
+p %>% head()
+#p = p %>%
+#  mutate(Dup = ifelse(SampleID %in% Dups[16], "Duplicate", "Single"))
+#  filter(!SampleID %in% Dups)
+ptmp = p %>% filter(Treatment %in% c("Silage-NCC", "Corn-RCC"),Soil_depth == 1)
+ptmp
+p1 = ggplot(ptmp, aes(x = Axis.1, y = Axis.2)) +
+geom_point(aes(fill = Treatment),  size = 2, shape = 22) +
+#theme_pub() +
+#scale_shape_manual(values=c(22))+#, guide = guide_legend(title = "Soil", ncol = 1))+
+#scale_color_manual(values=c('Orange','Black'))+
+scale_fill_manual(values = c('Orange','Black'))+
+labs(x = "PCoA 1 [44.3%]", y = "PCoA 2 [17.3%]") +
+ggtitle("PCoA of Weighted UniFrac Distances")+
+facet_wrap(~TimePoint, ncol = 2)
+
+#guides(fill=guide_legend(override.aes=list(colour= cs), ncol = 3)) + 
+#theme(legend.position="bottom") 
+
+#color = "grey20",
+
+p1
+```
+* Some structure, but clearly the most extreme treatments are not fully separating  And some samples are very, very similar.  Bring to PC and explore control samples and mock community.
